@@ -1,0 +1,490 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Whiteboard</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; font-family: system-ui, sans-serif; background: #f4f5f7; }
+  #toolbar {
+    position: fixed; top: 12px; left: 50%; transform: translateX(-50%);
+    background: #fff; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,.08);
+    padding: 8px; display: flex; gap: 6px; align-items: center; z-index: 10;
+    flex-wrap: wrap; max-width: calc(100vw - 24px);
+  }
+  .btn {
+    border: 0; background: #f4f5f7; border-radius: 8px; padding: 8px 10px;
+    cursor: pointer; font-size: 14px; display: inline-flex; align-items: center; gap: 4px;
+    transition: background .15s;
+  }
+  .btn:hover { background: #e8eaed; }
+  .btn.active { background: #2d6cdf; color: #fff; }
+  .sep { width: 1px; height: 24px; background: #e8eaed; margin: 0 4px; }
+  #colors { display: flex; gap: 4px; }
+  .swatch {
+    width: 22px; height: 22px; border-radius: 50%; cursor: pointer;
+    border: 2px solid transparent; transition: transform .1s;
+  }
+  .swatch:hover { transform: scale(1.1); }
+  .swatch.active { border-color: #333; }
+  input[type=range] { width: 80px; }
+  #status {
+    position: fixed; bottom: 12px; left: 12px; background: #fff;
+    padding: 6px 10px; border-radius: 8px; font-size: 12px;
+    box-shadow: 0 2px 8px rgba(0,0,0,.06); color: #666;
+  }
+  #peers {
+    position: fixed; top: 12px; right: 12px; background: #fff;
+    padding: 8px 12px; border-radius: 8px; font-size: 12px;
+    box-shadow: 0 2px 8px rgba(0,0,0,.06); z-index: 10;
+    display: flex; align-items: center; gap: 10px;
+  }
+  #room-tag {
+    background: #f4f5f7; border-radius: 6px; padding: 3px 8px; font-family: monospace;
+    cursor: pointer; transition: background .15s;
+  }
+  #room-tag:hover { background: #e8eaed; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; }
+  canvas { display: block; cursor: crosshair; background: #fff; }
+  #text-input {
+    position: absolute; display: none; border: 2px dashed #2d6cdf;
+    background: transparent; outline: none; font-family: sans-serif; padding: 2px;
+    min-width: 60px;
+  }
+  #cursors { position: fixed; inset: 0; pointer-events: none; z-index: 5; }
+  .cursor { position: absolute; transform: translate(-2px, -2px); font-size: 11px; white-space: nowrap; transition: left .05s linear, top .05s linear; }
+  .cursor-dot { width: 10px; height: 10px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 1px 3px rgba(0,0,0,.3); }
+  .cursor-label { color: #fff; padding: 1px 5px; border-radius: 4px; margin-top: 2px; display: inline-block; }
+  #toast {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: #333; color: #fff; padding: 8px 16px; border-radius: 8px;
+    font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none;
+  }
+  #toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+
+<div id="toolbar">
+  <button class="btn active" data-tool="pen">pen</button>
+  <button class="btn" data-tool="eraser">eraser</button>
+  <button class="btn" data-tool="line">line</button>
+  <button class="btn" data-tool="rect">rect</button>
+  <button class="btn" data-tool="ellipse">circle</button>
+  <button class="btn" data-tool="text">text</button>
+  <div class="sep"></div>
+  <div id="colors"></div>
+  <div class="sep"></div>
+  <label style="font-size:12px;color:#666;">size</label>
+  <input id="size" type="range" min="1" max="40" value="3">
+  <span id="size-val" style="font-size:12px;width:18px;">3</span>
+  <div class="sep"></div>
+  <button class="btn" id="undo">undo</button>
+  <button class="btn" id="clear">clear</button>
+  <button class="btn" id="save">save</button>
+</div>
+
+<div id="peers">
+  <span id="room-tag" title="Click to copy share link">room: —</span>
+  <span><span class="dot" style="background:#ccc"></span><span id="peer-count">connecting…</span></span>
+</div>
+<canvas id="board"></canvas>
+<div id="cursors"></div>
+<input id="text-input" type="text" />
+<div id="status">ready</div>
+<div id="toast"></div>
+
+<script type="module">
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+
+const SUPABASE_URL = 'https://brsbljvetnokyxoeedwo.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_E2z3d0za2iebRItb66YTww_-yHAeeO4';
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+
+// --- Room ---
+const params = new URLSearchParams(location.search);
+let room = params.get('room');
+if (!room) {
+  room = Math.random().toString(36).slice(2, 8);
+  const url = new URL(location);
+  url.searchParams.set('room', room);
+  history.replaceState(null, '', url);
+}
+document.getElementById('room-tag').textContent = 'room: ' + room;
+document.getElementById('room-tag').onclick = () => {
+  navigator.clipboard.writeText(location.href).then(() => toast('link copied'));
+};
+
+// --- Identity ---
+const myId = crypto.randomUUID();
+const PEER_COLORS = ['#e74c3c', '#3498db', '#2ecc71', '#f39c12', '#9b59b6', '#1abc9c', '#e67e22', '#34495e'];
+const myPeerColor = PEER_COLORS[Math.floor(Math.random() * PEER_COLORS.length)];
+const myName = 'User ' + myId.slice(0, 4);
+let opCounter = 0;
+const newOpId = () => `${myId}:${opCounter++}`;
+
+// --- Drawing state ---
+const canvas = document.getElementById('board');
+const ctx = canvas.getContext('2d');
+const cursorsEl = document.getElementById('cursors');
+const statusEl = document.getElementById('status');
+const peerCountEl = document.getElementById('peer-count');
+const textInput = document.getElementById('text-input');
+
+const COLORS = ['#111111', '#e74c3c', '#3498db', '#2ecc71', '#f39c12', '#9b59b6', '#1abc9c', '#34495e'];
+let color = COLORS[0];
+let size = 3;
+let tool = 'pen';
+
+const colorsEl = document.getElementById('colors');
+COLORS.forEach((c, i) => {
+  const s = document.createElement('div');
+  s.className = 'swatch' + (i === 0 ? ' active' : '');
+  s.style.background = c;
+  s.onclick = () => {
+    color = c;
+    document.querySelectorAll('.swatch').forEach(e => e.classList.remove('active'));
+    s.classList.add('active');
+  };
+  colorsEl.appendChild(s);
+});
+
+document.querySelectorAll('[data-tool]').forEach(b => {
+  b.onclick = () => {
+    tool = b.dataset.tool;
+    document.querySelectorAll('[data-tool]').forEach(e => e.classList.remove('active'));
+    b.classList.add('active');
+  };
+});
+
+document.getElementById('size').oninput = e => {
+  size = +e.target.value;
+  document.getElementById('size-val').textContent = size;
+};
+document.getElementById('undo').onclick = () => undoMine();
+document.getElementById('clear').onclick = () => {
+  if (confirm('Clear the whole board for everyone?')) doClear();
+};
+document.getElementById('save').onclick = () => {
+  const link = document.createElement('a');
+  link.download = 'whiteboard.png';
+  link.href = canvas.toDataURL('image/png');
+  link.click();
+};
+
+let dpr = window.devicePixelRatio || 1;
+function resize() {
+  dpr = window.devicePixelRatio || 1;
+  canvas.width = window.innerWidth * dpr;
+  canvas.height = window.innerHeight * dpr;
+  canvas.style.width = window.innerWidth + 'px';
+  canvas.style.height = window.innerHeight + 'px';
+  redraw();
+}
+window.addEventListener('resize', resize);
+
+let ops = [];
+let myDraft = null;
+
+function setStroke(c, sz, erase) {
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.lineWidth = sz * dpr;
+  ctx.strokeStyle = c;
+  ctx.fillStyle = c;
+  ctx.globalCompositeOperation = erase ? 'destination-out' : 'source-over';
+}
+
+function drawStroke(points, c, sz, erase) {
+  if (!points || points.length === 0) return;
+  setStroke(c, sz, erase);
+  ctx.beginPath();
+  ctx.moveTo(points[0].x * dpr, points[0].y * dpr);
+  if (points.length === 1) {
+    ctx.arc(points[0].x * dpr, points[0].y * dpr, (sz / 2) * dpr, 0, Math.PI * 2);
+    ctx.fill();
+  } else {
+    for (let i = 1; i < points.length; i++) ctx.lineTo(points[i].x * dpr, points[i].y * dpr);
+    ctx.stroke();
+  }
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+function drawLine(x1, y1, x2, y2, c, sz) {
+  setStroke(c, sz, false);
+  ctx.beginPath();
+  ctx.moveTo(x1 * dpr, y1 * dpr);
+  ctx.lineTo(x2 * dpr, y2 * dpr);
+  ctx.stroke();
+}
+function drawRect(x1, y1, x2, y2, c, sz) {
+  setStroke(c, sz, false);
+  ctx.strokeRect(Math.min(x1,x2)*dpr, Math.min(y1,y2)*dpr, Math.abs(x2-x1)*dpr, Math.abs(y2-y1)*dpr);
+}
+function drawEllipse(x1, y1, x2, y2, c, sz) {
+  setStroke(c, sz, false);
+  const cx = (x1+x2)/2*dpr, cy = (y1+y2)/2*dpr;
+  const rx = Math.abs(x2-x1)/2*dpr, ry = Math.abs(y2-y1)/2*dpr;
+  ctx.beginPath();
+  ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+  ctx.stroke();
+}
+function drawText(x, y, text, c, sz) {
+  ctx.fillStyle = c;
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.font = `${Math.max(12, sz * 4) * dpr}px sans-serif`;
+  ctx.textBaseline = 'top';
+  ctx.fillText(text, x * dpr, y * dpr);
+}
+
+function drawOp(op) {
+  if (op.type === 'stroke') drawStroke(op.points, op.color, op.size, op.erase);
+  else if (op.type === 'line') drawLine(op.x1, op.y1, op.x2, op.y2, op.color, op.size);
+  else if (op.type === 'rect') drawRect(op.x1, op.y1, op.x2, op.y2, op.color, op.size);
+  else if (op.type === 'ellipse') drawEllipse(op.x1, op.y1, op.x2, op.y2, op.color, op.size);
+  else if (op.type === 'text') drawText(op.x, op.y, op.text, op.color, op.size);
+}
+
+function redraw() {
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.restore();
+  for (const op of ops) drawOp(op);
+  if (myDraft) drawOp(myDraft);
+}
+
+// --- Input ---
+function pos(e) {
+  const r = canvas.getBoundingClientRect();
+  const t = e.touches ? e.touches[0] : e;
+  return { x: t.clientX - r.left, y: t.clientY - r.top };
+}
+
+let drawing = false;
+canvas.addEventListener('pointerdown', (e) => {
+  if (tool === 'text') { const p = pos(e); openTextInput(p.x, p.y); return; }
+  drawing = true;
+  const p = pos(e);
+  if (tool === 'pen' || tool === 'eraser') {
+    myDraft = { type: 'stroke', points: [p], color, size, erase: tool === 'eraser' };
+  } else {
+    myDraft = { type: tool, x1: p.x, y1: p.y, x2: p.x, y2: p.y, color, size };
+  }
+  canvas.setPointerCapture(e.pointerId);
+});
+
+canvas.addEventListener('pointermove', (e) => {
+  const p = pos(e);
+  throttleCursor(p);
+  if (!drawing) return;
+  if (tool === 'pen' || tool === 'eraser') {
+    myDraft.points.push(p);
+    const pts = myDraft.points;
+    if (pts.length >= 2) {
+      broadcast('live', { points: [pts[pts.length - 2], pts[pts.length - 1]], color, size, erase: tool === 'eraser' });
+    }
+  } else {
+    myDraft.x2 = p.x; myDraft.y2 = p.y;
+  }
+  redraw();
+});
+
+function endDraw() {
+  if (!drawing) return;
+  drawing = false;
+  if (myDraft) {
+    const d = myDraft;
+    const skip = d.type !== 'stroke' && d.x1 === d.x2 && d.y1 === d.y2;
+    if (!skip) {
+      const op = { ...d, id: newOpId(), clientId: myId };
+      ops.push(op);
+      broadcast('op', op);
+    }
+  }
+  myDraft = null;
+  redraw();
+}
+canvas.addEventListener('pointerup', endDraw);
+canvas.addEventListener('pointercancel', endDraw);
+canvas.addEventListener('pointerleave', endDraw);
+
+// --- Text ---
+function openTextInput(x, y) {
+  textInput.style.display = 'block';
+  textInput.style.left = x + 'px';
+  textInput.style.top = y + 'px';
+  textInput.style.color = color;
+  textInput.style.fontSize = Math.max(12, size * 4) + 'px';
+  textInput.value = '';
+  textInput.focus();
+  textInput.dataset.x = x;
+  textInput.dataset.y = y;
+}
+function commitText() {
+  const t = textInput.value.trim();
+  if (t) {
+    const op = { id: newOpId(), clientId: myId, type: 'text', x: +textInput.dataset.x, y: +textInput.dataset.y, text: t, color, size };
+    ops.push(op);
+    drawOp(op);
+    broadcast('op', op);
+  }
+  textInput.style.display = 'none';
+  textInput.value = '';
+}
+textInput.addEventListener('blur', commitText);
+textInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); textInput.blur(); }
+  if (e.key === 'Escape') { textInput.value = ''; textInput.blur(); }
+});
+
+// --- Keyboard ---
+window.addEventListener('keydown', (e) => {
+  if (document.activeElement === textInput) return;
+  if ((e.ctrlKey || e.metaKey) && e.key === 'z') { e.preventDefault(); undoMine(); }
+  const keys = { p: 'pen', e: 'eraser', l: 'line', r: 'rect', c: 'ellipse', t: 'text' };
+  if (keys[e.key]) {
+    tool = keys[e.key];
+    document.querySelectorAll('[data-tool]').forEach(b => b.classList.toggle('active', b.dataset.tool === tool));
+  }
+});
+
+// --- Actions ---
+function undoMine() {
+  for (let i = ops.length - 1; i >= 0; i--) {
+    if (ops[i].clientId === myId) {
+      const removed = ops.splice(i, 1)[0];
+      redraw();
+      broadcast('remove', { opId: removed.id });
+      return;
+    }
+  }
+}
+
+function doClear() {
+  ops = [];
+  redraw();
+  broadcast('clear', {});
+}
+
+// --- Supabase Realtime ---
+const peers = new Map();
+let gotSnapshot = false;
+
+const channel = supabase.channel('room:' + room, {
+  config: { broadcast: { self: false }, presence: { key: myId } }
+});
+
+function broadcast(event, payload) {
+  channel.send({ type: 'broadcast', event, payload });
+}
+
+channel
+  .on('broadcast', { event: 'op' }, ({ payload }) => {
+    ops.push(payload);
+    drawOp(payload);
+  })
+  .on('broadcast', { event: 'remove' }, ({ payload }) => {
+    ops = ops.filter(o => o.id !== payload.opId);
+    redraw();
+  })
+  .on('broadcast', { event: 'clear' }, () => {
+    ops = [];
+    redraw();
+  })
+  .on('broadcast', { event: 'live' }, ({ payload }) => {
+    drawStroke(payload.points, payload.color, payload.size, payload.erase);
+  })
+  .on('broadcast', { event: 'cursor' }, ({ payload }) => {
+    updateCursor(payload.clientId, payload.x, payload.y);
+  })
+  .on('broadcast', { event: 'snap-req' }, ({ payload }) => {
+    if (payload.who !== myId && ops.length) {
+      broadcast('snap', { to: payload.who, ops });
+    }
+  })
+  .on('broadcast', { event: 'snap' }, ({ payload }) => {
+    if (payload.to === myId && !gotSnapshot) {
+      gotSnapshot = true;
+      ops = payload.ops;
+      redraw();
+    }
+  })
+  .on('presence', { event: 'sync' }, () => {
+    const state = channel.presenceState();
+    peers.clear();
+    for (const key in state) {
+      if (key !== myId) peers.set(key, state[key][0]);
+    }
+    // Clean up stale cursors
+    for (const id of [...cursorEls.keys()]) {
+      if (!peers.has(id)) removeCursor(id);
+    }
+    updatePeerCount();
+  })
+  .subscribe(async (status) => {
+    if (status === 'SUBSCRIBED') {
+      statusEl.textContent = 'connected — room ' + room;
+      await channel.track({ id: myId, name: myName, color: myPeerColor });
+      broadcast('snap-req', { who: myId });
+      // If no one responds within 1.5s, assume we're the first
+      setTimeout(() => { gotSnapshot = true; }, 1500);
+    } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+      statusEl.textContent = 'connection error';
+    } else if (status === 'CLOSED') {
+      statusEl.textContent = 'disconnected';
+    }
+  });
+
+function updatePeerCount() {
+  const n = peers.size + 1;
+  peerCountEl.innerHTML = `<span class="dot" style="background:#2ecc71"></span>${n} user${n === 1 ? '' : 's'}`;
+}
+
+// --- Cursors ---
+const cursorEls = new Map();
+let lastCursorSent = 0;
+function throttleCursor(p) {
+  const now = Date.now();
+  if (now - lastCursorSent > 50) {
+    lastCursorSent = now;
+    broadcast('cursor', { clientId: myId, x: p.x, y: p.y });
+  }
+}
+function updateCursor(id, x, y) {
+  const peer = peers.get(id);
+  if (!peer) return;
+  let el = cursorEls.get(id);
+  if (!el) {
+    el = document.createElement('div');
+    el.className = 'cursor';
+    el.innerHTML = `<div class="cursor-dot" style="background:${peer.color}"></div><div class="cursor-label" style="background:${peer.color}">${peer.name}</div>`;
+    cursorsEl.appendChild(el);
+    cursorEls.set(id, el);
+  }
+  const r = canvas.getBoundingClientRect();
+  el.style.left = (r.left + x) + 'px';
+  el.style.top = (r.top + y) + 'px';
+}
+function removeCursor(id) {
+  const el = cursorEls.get(id);
+  if (el) { el.remove(); cursorEls.delete(id); }
+}
+
+// --- Toast ---
+const toastEl = document.getElementById('toast');
+let toastTimer;
+function toast(msg) {
+  toastEl.textContent = msg;
+  toastEl.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toastEl.classList.remove('show'), 1500);
+}
+
+// --- Init ---
+resize();
+</script>
+</body>
+</html>
